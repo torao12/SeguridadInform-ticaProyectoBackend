@@ -44,26 +44,32 @@ const verifyToken = (req, res, next) => {
     });
 };
 
-// Endpoint 1: Login (Con Rate Limiting, consultas parametrizadas y validación bcrypt)
+// Endpoint 1: Login con Trazabilidad (Audit Logs), Rate Limiting y bcrypt
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body;
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
     try {
         const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
         
-        // Prevención de enumeración de usuarios
         if (result.rows.length === 0) {
+            // Registro de auditoría: Intento fallido (usuario no existe)
+            await pool.query('INSERT INTO audit_logs (username, ip_address, status) VALUES ($1, $2, $3)', [username || 'unknown', clientIp, 'FAILED']);
             return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
         }
 
         const user = result.rows[0];
         
-        // Validación de seguridad real contra el hash almacenado
         const validPassword = await bcrypt.compare(password, user.password_hash);
         if (!validPassword) {
+            // Registro de auditoría: Intento fallido (contraseña incorrecta)
+            await pool.query('INSERT INTO audit_logs (username, ip_address, status) VALUES ($1, $2, $3)', [username, clientIp, 'FAILED']);
             return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
         }
         
-        // Generamos el token incluyendo el rol (RBAC básico)
+        // Registro de auditoría: Acceso exitoso
+        await pool.query('INSERT INTO audit_logs (username, ip_address, status) VALUES ($1, $2, $3)', [username, clientIp, 'SUCCESS']);
+        
         const token = jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1h' });
         res.json({ token, message: 'Autenticación exitosa', role: user.role });
 

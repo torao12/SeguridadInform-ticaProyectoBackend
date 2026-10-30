@@ -2,11 +2,14 @@ const express = require('express');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-const bcrypt = require('bcryptjs'); // Agregado: Importar bcryptjs para cifrado
+const bcrypt = require('bcryptjs');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+app.use(helmet()); // Inyecta cabeceras de seguridad HTTP instantáneamente
 
 // Llave secreta para firmar los JWT (En producción esto va en un archivo .env)
 const SECRET_KEY = 'clave_secreta_para_clase_seguridad';
@@ -18,6 +21,13 @@ const pool = new Pool({
     database: 'netsentinel',
     password: 'adminpassword',
     port: 5432,
+});
+
+// Configuración de Rate Limit (Previene ataques de fuerza bruta al Login)
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // Ventana de 15 minutos
+    max: 5, // Bloquea tras 5 intentos fallidos o exitosos
+    message: { error: 'Demasiados intentos de acceso desde esta IP. Bloqueo temporal de 15 minutos.' }
 });
 
 // Middleware de Seguridad: Validar JWT
@@ -34,13 +44,13 @@ const verifyToken = (req, res, next) => {
     });
 };
 
-// Endpoint 1: Login (Uso de consultas parametrizadas $1 para evitar SQLi y validación bcrypt)
-app.post('/api/auth/login', async (req, res) => {
+// Endpoint 1: Login (Con Rate Limiting, consultas parametrizadas y validación bcrypt)
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body;
     try {
         const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
         
-        // Prevención de enumeración de usuarios: mensaje de error genérico
+        // Prevención de enumeración de usuarios
         if (result.rows.length === 0) {
             return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
         }

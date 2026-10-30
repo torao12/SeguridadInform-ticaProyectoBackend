@@ -84,6 +84,30 @@ app.get('/api/alerts', verifyToken, async (req, res) => {
     }
 });
 
+// Endpoint 3: Ingesta Dinámica de Alertas (Recibe telemetría de agentes externos)
+app.post('/api/alerts', async (req, res) => {
+    const { severity, source_ip, event_type, description } = req.body;
+
+    // Validación estricta de la estructura de datos entrante
+    if (!severity || !source_ip || !event_type || !description) {
+        return res.status(400).json({ error: 'Payload incompleto. Faltan métricas de seguridad obligatorias.' });
+    }
+
+    try {
+        const query = `
+            INSERT INTO alerts (severity, source_ip, event_type, description) 
+            VALUES ($1, $2, $3, $4) RETURNING *;
+        `;
+        const values = [severity, source_ip, event_type, description];
+        
+        const result = await pool.query(query, values);
+        res.status(201).json({ message: 'Incidente de seguridad registrado exitosamente', alert: result.rows[0] });
+    } catch (error) {
+        console.error('Error procesando la telemetría:', error);
+        res.status(500).json({ error: 'Error interno del SIEM al registrar el evento' });
+    }
+});
+
 const PORT = 3001;
 app.listen(PORT, () => {
     console.log(`API de Seguridad corriendo en http://localhost:${PORT}`);

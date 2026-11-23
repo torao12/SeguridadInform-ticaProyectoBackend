@@ -23,6 +23,7 @@ const pool = new Pool({
     database: process.env.DB_NAME || 'netsentinel',
     password: process.env.DB_PASSWORD || 'adminpassword',
     port: Number(process.env.DB_PORT) || 5432,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
 // 1. WAF Middleware Avanzado: Motor de Detección Profunda ajustado

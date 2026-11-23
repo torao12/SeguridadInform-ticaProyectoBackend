@@ -1,28 +1,35 @@
 #!/bin/bash
-echo "Iniciando agente simulador NetSentinel..."
+TARGET_HOST="localhost"
+TARGET_PORT="3001"
+BASE_URL="http://$TARGET_HOST:$TARGET_PORT"
 
-IPS=("192.168.1.45" "10.0.0.12" "172.16.0.8" "203.0.113.5")
-SEVERITY=("HIGH" "CRITICAL" "MEDIUM")
-EVENTS=("SQL Injection Attempt" "DDoS Pattern Detected" "Unauthorized SSH Access" "Malware Signature Match")
+echo "[*] Atacante: Iniciando secuencia de prueba controlada..."
 
-for i in {1..5}
-do
-    RAND_IP=${IPS[$RANDOM % ${#IPS[@]}]}
-    RAND_SEV=${SEVERITY[$RANDOM % ${#SEVERITY[@]}]}
-    RAND_EV=${EVENTS[$RANDOM % ${#EVENTS[@]}]}
-    
-    curl -X POST http://localhost:3001/api/alerts \
-         -H "Content-Type: application/json" \
-         -d "{
-               \"severity\": \"$RAND_SEV\",
-               \"source_ip\": \"$RAND_IP\",
-               \"event_type\": \"$RAND_EV\",
-               \"description\": \"Alerta automatizada generada por agente SIEM.\"
-             }" \
-         -s > /dev/null
-
-    echo "[!] Alerta enviada: $RAND_EV desde $RAND_IP"
-    sleep 2
+echo "[+] 1. Disparando Fuerza Bruta (6 intentos al login)..."
+for i in {1..6}; do
+    curl -s -X POST "$BASE_URL/api/auth/login" -H "Content-Type: application/json" -d '{"username": "admin", "password": "wrong"}' > /dev/null
 done
+sleep 2
 
-echo "Simulación completada."
+echo "[+] 2. Disparando Directory Traversal (LFI)..."
+curl -s -X GET "$BASE_URL/api/auth/login?file=../../../etc/shadow" > /dev/null
+sleep 2
+
+echo "[+] 3. Disparando Inyección SQL (SQLi)..."
+curl -s -G "$BASE_URL/api/auth/login" --data-urlencode "user=' UNION SELECT null--" > /dev/null
+sleep 2
+
+echo "[+] 4. Disparando Cross-Site Scripting (XSS)..."
+curl -s -X POST "$BASE_URL/api/auth/login" -H "Content-Type: application/json" -d '{"username": "<script>alert(1)</script>", "password": "123"}' > /dev/null
+sleep 2
+
+echo "[+] 5. Disparando OS Command Injection..."
+curl -s -G "$BASE_URL/api/auth/login" --data-urlencode "host=localhost; cat /etc/passwd" > /dev/null
+sleep 2
+
+echo "[+] 6. Simulando Escáner de Vulnerabilidades (Bot)..."
+# Falsificamos la cabecera User-Agent para que el WAF crea que somos SQLMap
+curl -s -X GET "$BASE_URL/api/auth/login" -H "User-Agent: sqlmap/1.5.8#dev (http://sqlmap.org)" > /dev/null
+
+echo "----------------------------------------"
+echo "[*] Secuencia completada. El agente se detuvo automáticamente."

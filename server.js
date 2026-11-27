@@ -56,13 +56,19 @@ const wafMiddleware = async (req, res, next) => {
     try {
         // Limpiamos los caracteres de formato JSON nativo (", {, }) para evitar Falsos Positivos
         const bodyString = JSON.stringify(req.body || {}).replace(/["{}]/g, ''); 
-        const payload = decodeURIComponent(req.originalUrl) + bodyString;
+        let decodedUrl = req.originalUrl;
+        try {
+            decodedUrl = decodeURIComponent(req.originalUrl);
+        } catch {
+            return res.status(400).json({ error: 'URL malformada.', code: 'MALFORMED_URL' });
+        }
+        const payload = decodedUrl + bodyString;
         
         const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
         const userAgent = req.headers['user-agent'] || ''; 
 
         // Firmas ajustadas: Quitamos el chequeo de comillas sueltas que rompían el Login normal
-        const sqliPattern = /(OR\s+\d+=\d+)|(UNION\s+SELECT)|(--)|(';)/i;
+        const sqliPattern = /(OR\s+\d+=\d+)|(UNION\s+SELECT)|(--\s*$)|(';)/i;
         const pathTraversalPattern = /(\.\.\/)|(\/etc\/[a-z]+)|(c:\\windows)/i;
         const xssPattern = /(<script>)|(javascript:)|(onerror=)|(onload=)/i;
         const cmdInjectionPattern = /(;\s*cat)|(\|\s*ls)|(;\s*rm)|(`.*`)|(\$\(.*\))/i;
@@ -126,12 +132,14 @@ const loginLimiter = rateLimit({
 // Middleware de Seguridad: Validar JWT
 const verifyToken = (req, res, next) => {
     if (!SECRET_KEY) return res.status(503).json({ error: 'El servidor no tiene configurada JWT_SECRET.' });
-    const authHeader = req.headers['authorization'];
-    if (!authHeader) return res.status(403).json({ error: 'Acceso denegado.' });
+    const authHeader = req.headers['authorization'] || '';
+    const [scheme, token] = authHeader.trim().split(/\s+/);
+    if (scheme !== 'Bearer' || !token) {
+        return res.status(401).json({ error: 'Token de autenticación requerido.' });
+    }
 
-    const token = authHeader.split(' ')[1];
-    jwt.verify(token, SECRET_KEY, (err, decoded) => {
-        if (err) return res.status(401).json({ error: 'Token inválido.' });
+    jwt.verify(token, SECRET_KEY, { algorithms: ['HS256'] }, (err, decoded) => {
+        if (err) return res.status(401).json({ error: 'Token inválido o expirado.' });
         req.user = decoded;
         next();
     });
@@ -139,11 +147,33 @@ const verifyToken = (req, res, next) => {
 
 // --- ENDPOINTS ---
 
+const resetLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Demasiadas solicitudes de reinicio. Espera antes de intentar de nuevo.', code: 'RESET_RATE_LIMITED' },
+});
+
+const requireRole = (...allowedRoles) => (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+        return res.status(403).json({ error: 'No tienes permisos para realizar esta acción.' });
+    }
+    next();
+};
+
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body || {};
     const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const cleanUsername = typeof username === 'string' ? username.trim() : '';
 
-    if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+    if (
+        !cleanUsername ||
+        typeof password !== 'string' ||
+        !password ||
+        cleanUsername.length > 100 ||
+        password.length > 128
+    ) {
         return res.status(400).json({ error: 'Escribe un usuario y una contrasena validos.', code: 'INVALID_INPUT' });
     }
     if (!SECRET_KEY) {
@@ -152,9 +182,9 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     }
 
     try {
-        const result = await pool.query('SELECT id, username, password_hash, role FROM users WHERE username = $1', [username]);
+        const result = await pool.query('SELECT id, username, password_hash, role FROM users WHERE username = $1', [cleanUsername]);
         if (result.rows.length === 0) {
-            await auditLogin(username, clientIp, 'FAILED');
+            await auditLogin(cleanUsername, clientIp, 'FAILED');
             return res.status(401).json({ error: 'Usuario o contrasena incorrectos.', code: 'INVALID_CREDENTIALS' });
         }
 
@@ -169,11 +199,12 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
             validPassword = await bcrypt.compare(password, user.password_hash);
         } catch (error) {
             console.error('No se pudo validar password_hash con bcryptjs:', error);
-            return res.status(503).json({ error: 'La contrasena almacenada para esta cuenta no es valida. Contacta al administrador.', code: 'INVALID_PASSWORD_HASH' });
+            await auditLogin(cleanUsername, clientIp, 'FAILED');
+            return res.status(401).json({ error: 'Usuario o contrasena incorrectos.', code: 'INVALID_CREDENTIALS' });
         }
 
         if (!validPassword) {
-            await auditLogin(username, clientIp, 'FAILED');
+            await auditLogin(cleanUsername, clientIp, 'FAILED');
             return res.status(401).json({ error: 'Usuario o contrasena incorrectos.', code: 'INVALID_CREDENTIALS' });
         }
 
@@ -185,7 +216,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
             return res.status(503).json({ error: 'No se pudo configurar la sesion. Contacta al administrador.', code: 'JWT_SIGNING_FAILED' });
         }
 
-        await auditLogin(username, clientIp, 'SUCCESS');
+        await auditLogin(cleanUsername, clientIp, 'SUCCESS');
         return res.json({ token, message: 'Autenticacion exitosa', role: user.role });
     } catch (error) {
         console.error('Error al autenticar contra PostgreSQL:', error);
@@ -221,9 +252,11 @@ app.get('/api/audit', verifyToken, async (req, res) => {
 });
 
 // Limpiar alertas y auditoría para reiniciar una demo.
-app.delete('/api/telemetry/reset', verifyToken, async (req, res) => {
+app.delete('/api/telemetry/reset', resetLimiter, verifyToken, requireRole('admin'), async (req, res) => {
     try {
+        const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
         await pool.query('TRUNCATE TABLE alerts, audit_logs RESTART IDENTITY;');
+        await auditLogin(req.user?.id ? `admin:${req.user.id}` : 'admin', clientIp, 'RESET_TELEMETRY');
         res.sendStatus(200);
     } catch (error) {
         console.error(error);
